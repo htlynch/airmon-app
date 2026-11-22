@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>airmon logger</title>
+<style>
+  body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:14px;background:#111;color:#eee}
+  h1{font-size:20px;margin:0 0 10px}
+  button{font-size:16px;padding:10px 14px;margin:4px 4px 4px 0;border:0;border-radius:10px;background:#2b7de9;color:#fff}
+  button.alt{background:#444}
+  #status{margin:8px 0;font-weight:600}
+  #big{display:flex;gap:10px;margin:10px 0}
+  .tile{flex:1;background:#222;border-radius:12px;padding:10px;text-align:center}
+  .tile b{display:block;font-size:26px}
+  input,select{font-size:16px;padding:8px;border-radius:8px;border:1px solid #555;background:#222;color:#eee}
+  #log{font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;background:#000;border-radius:10px;padding:8px;height:45vh;overflow:auto;margin-top:10px}
+</style>
+</head>
+<body>
+<h1>airmon logger</h1>
+<div>
+  <button id="go">Connect</button>
+  <button id="stop" class="alt">Disconnect</button>
+  <button id="copy" class="alt">Copy log</button>
+  <button id="clear" class="alt">Clear</button>
+</div>
+<div id="status">Idle. Open this page in the Bluefy app.</div>
+<div id="big">
+  <div class="tile">Battery<b id="batt">--</b></div>
+  <div class="tile">Packets<b id="count">0</b></div>
+</div>
+<div>
+  <select id="target">
+    <option value="cd4d5f64-39b9-48f0-bcad-c83082e02923">CD4D (write)</option>
+    <option value="7121461c-7157-453f-b86c-31b691b135a9">7121 (r/w/n)</option>
+    <option value="e4856e91-1303-4861-b644-2278014488a7">E485 (r/w/n)</option>
+  </select>
+  <input id="hex" placeholder="hex e.g. 01" size="10">
+  <button id="send">Send</button>
+</div>
+<div>
+  <button class="alt q" data-v="01">01</button>
+  <button class="alt q" data-v="00">00</button>
+  <button class="alt q" data-v="02">02</button>
+  <button class="alt q" data-v="FF">FF</button>
+  <button class="alt q" data-v="AA55">AA55</button>
+</div>
+<div id="log"></div>
+
+<script>
+const SVC = 'baeff316-6be0-4264-9401-142f3e28cf55';
+const NAMES = {
+  '7121461c-7157-453f-b86c-31b691b135a9':'7121',
+  'cd4d5f64-39b9-48f0-bcad-c83082e02923':'CD4D',
+  'e4856e91-1303-4861-b644-2278014488a7':'E485',
+  'feb02176-4dea-4752-924c-80dd7eea7f1e':'FEB0',
+  '00002a19-0000-1000-8000-00805f9b34fb':'BATT'
+};
+let device, chars = {}, keepAlive, packets = 0;
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+
+function ts(){ const d=new Date(); return d.toTimeString().slice(0,8)+'.'+String(d.getMilliseconds()).padStart(3,'0'); }
+function log(msg){ logEl.textContent += ts()+'  '+msg+'\n'; logEl.scrollTop = logEl.scrollHeight; }
+function status(s){ $('status').textContent = s; }
+function hex(dv){ return [...new Uint8Array(dv.buffer)].map(b=>b.toString(16).padStart(2,'0')).join(' ').toUpperCase(); }
+function ascii(dv){ return [...new Uint8Array(dv.buffer)].map(b=>b>=32&&b<127?String.fromCharCode(b):'.').join(''); }
+function guess(dv){
+  const n = dv.byteLength, out = [];
+  if (n>=2){ const a=[]; for(let i=0;i+1<n;i+=2) a.push(dv.getUint16(i,true)); out.push('u16LE['+a.join(',')+']'); }
+  if (n>=2){ const a=[]; for(let i=0;i+1<n;i+=2) a.push(dv.getUint16(i,false)); out.push('u16BE['+a.join(',')+']'); }
+  return out.join(' ');
+}
+function show(name, dv, kind){
+  packets++; $('count').textContent = packets;
+  log(`${kind} ${name} (${dv.byteLength}B): ${hex(dv)} | "${ascii(dv)}" | ${guess(dv)}`);
+  if (name==='BATT' && dv.byteLength) $('batt').textContent = dv.getUint8(0)+'%';
+}
+
+async function readAll(){
+  for (const [uuid,c] of Object.entries(chars)){
+    if (c.properties.read){
+      try { show(NAMES[uuid]||uuid, await c.readValue(), 'READ'); }
+      catch(e){ log('read fail '+(NAMES[uuid]||uuid)+': '+e.message); }
+    }
+  }
+}
+
+$('go').onclick = async () => {
+  if (!navigator.bluetooth){ status('No Web Bluetooth. Open this page in the Bluefy app.'); return; }
+  try {
+    status('Pick airmon in the list…');
+    device = await navigator.bluetooth.requestDevice({
+      filters:[{namePrefix:'airmon'}],
+      optionalServices:[SVC,'battery_service','tx_power','link_loss']
+    });
+    device.addEventListener('gattserverdisconnected', () => { status('Disconnected'); log('--- disconnected'); clearInterval(keepAlive); });
+    status('Connecting…');
+    const server = await device.gatt.connect();
+    log('connected to '+device.name);
+    chars = {};
+    const svc = await server.getPrimaryService(SVC);
+    for (const c of await svc.getCharacteristics()){
+      const u = c.uuid, p = c.properties;
+      chars[u] = c;
+      log(`char ${NAMES[u]||u}: ${['read','write','writeWithoutResponse','notify','indicate'].filter(k=>p[k]).join(',')}`);
+      if (p.notify || p.indicate){
+        c.addEventListener('characteristicvaluechanged', ev => show(NAMES[u]||u, ev.target.value, p.indicate?'IND':'NOTIF'));
+        try { await c.startNotifications(); log('subscribed '+(NAMES[u]||u)); }
+        catch(e){ log('subscribe fail '+(NAMES[u]||u)+': '+e.message); }
+      }
+    }
+    try {
+      const b = await (await server.getPrimaryService('battery_service')).getCharacteristic('battery_level');
+      chars[b.uuid] = b;
+      b.addEventListener('characteristicvaluechanged', ev => show('BATT', ev.target.value, 'NOTIF'));
+      try { await b.startNotifications(); } catch(e){}
+    } catch(e){ log('no battery: '+e.message); }
+    await readAll();
+    keepAlive = setInterval(readAll, 15000); // re-read every 15s so it doesn't hit the 60s idle drop
+    status('Connected. Logging. Re-reads every 15s.');
+  } catch(e){ status('Error: '+e.message); log('ERROR '+e.message); }
+};
+
+$('stop').onclick = () => { clearInterval(keepAlive); if (device && device.gatt.connected) device.gatt.disconnect(); };
+$('clear').onclick = () => { logEl.textContent=''; packets=0; $('count').textContent='0'; };
+$('copy').onclick = async () => {
+  try { await navigator.clipboard.writeText(logEl.textContent); status('Log copied. Paste it to Claude.'); }
+  catch(e){ const r=document.createRange(); r.selectNodeContents(logEl); getSelection().removeAllRanges(); getSelection().addRange(r); status('Selected. Tap Copy.'); }
+};
+
+async function send(v){
+  const c = chars[$('target').value];
+  if (!c){ status('Connect first'); return; }
+  const clean = v.replace(/[^0-9a-f]/gi,'');
+  if (!clean || clean.length%2){ status('Hex must be pairs, e.g. 01 or AA55'); return; }
+  const bytes = new Uint8Array(clean.match(/../g).map(h=>parseInt(h,16)));
+  try {
+    if (c.properties.write) await c.writeValueWithResponse(bytes); else await c.writeValueWithoutResponse(bytes);
+    log(`WRITE ${NAMES[c.uuid]}: ${clean.toUpperCase()}`);
+    setTimeout(readAll, 500);
+  } catch(e){ log('write fail: '+e.message); }
+}
+$('send').onclick = () => send($('hex').value);
+document.querySelectorAll('.q').forEach(b => b.onclick = () => send(b.dataset.v));
+</script>
+</body>
+</html>
