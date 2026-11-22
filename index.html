@@ -25,6 +25,7 @@
   <button id="copy" class="alt">Copy log</button>
   <button id="clear" class="alt">Clear</button>
 </div>
+<label style="display:block;margin:6px 0"><input type="checkbox" id="all" style="transform:scale(1.4);margin-right:8px">Show all devices</label>
 <div id="status">Idle. Open this page in the Bluefy app.</div>
 <div id="big">
   <div class="tile">Battery<b id="batt">--</b></div>
@@ -91,10 +92,11 @@ $('go').onclick = async () => {
   if (!navigator.bluetooth){ status('No Web Bluetooth. Open this page in the Bluefy app.'); return; }
   try {
     status('Pick airmon in the list…');
-    device = await navigator.bluetooth.requestDevice({
-      filters:[{namePrefix:'airmon'}],
-      optionalServices:[SVC,'battery_service','tx_power','link_loss']
-    });
+    const opt = [SVC,'battery_service','tx_power','link_loss'];
+    device = await navigator.bluetooth.requestDevice(
+      $('all').checked ? {acceptAllDevices:true, optionalServices:opt}
+                       : {filters:[{namePrefix:'airmon'},{services:[SVC]}], optionalServices:opt}
+    );
     device.addEventListener('gattserverdisconnected', () => { status('Disconnected'); log('--- disconnected'); clearInterval(keepAlive); });
     status('Connecting…');
     const server = await device.gatt.connect();
