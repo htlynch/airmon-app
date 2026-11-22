@@ -83,7 +83,7 @@ async function readAll(){
   for (const [uuid,c] of Object.entries(chars)){
     if (c.properties.read){
       try { show(NAMES[uuid]||uuid, await c.readValue(), 'READ'); }
-      catch(e){ log('read fail '+(NAMES[uuid]||uuid)+': '+e.message); }
+      catch(e){ log('read fail '+(NAMES[uuid]||uuid)+': '+errStr(e)); }
     }
   }
 }
@@ -97,9 +97,15 @@ $('go').onclick = async () => {
       $('all').checked ? {acceptAllDevices:true, optionalServices:opt}
                        : {filters:[{namePrefix:'airmon'},{services:[SVC]}], optionalServices:opt}
     );
+    log('picked: '+(device.name||'(no name)')+' id='+device.id);
     device.addEventListener('gattserverdisconnected', () => { status('Disconnected'); log('--- disconnected'); clearInterval(keepAlive); });
-    status('Connecting…');
-    const server = await device.gatt.connect();
+    let server;
+    for (let i=1;i<=3 && !server;i++){
+      status('Connecting… try '+i);
+      try { server = await device.gatt.connect(); }
+      catch(e){ log('connect try '+i+' failed: '+errStr(e)); await new Promise(r=>setTimeout(r,1500)); }
+    }
+    if (!server) throw new Error('could not connect after 3 tries');
     log('connected to '+device.name);
     chars = {};
     const svc = await server.getPrimaryService(SVC);
@@ -110,7 +116,7 @@ $('go').onclick = async () => {
       if (p.notify || p.indicate){
         c.addEventListener('characteristicvaluechanged', ev => show(NAMES[u]||u, ev.target.value, p.indicate?'IND':'NOTIF'));
         try { await c.startNotifications(); log('subscribed '+(NAMES[u]||u)); }
-        catch(e){ log('subscribe fail '+(NAMES[u]||u)+': '+e.message); }
+        catch(e){ log('subscribe fail '+(NAMES[u]||u)+': '+errStr(e)); }
       }
     }
     try {
@@ -118,12 +124,13 @@ $('go').onclick = async () => {
       chars[b.uuid] = b;
       b.addEventListener('characteristicvaluechanged', ev => show('BATT', ev.target.value, 'NOTIF'));
       try { await b.startNotifications(); } catch(e){}
-    } catch(e){ log('no battery: '+e.message); }
+    } catch(e){ log('no battery: '+errStr(e)); }
     await readAll();
     keepAlive = setInterval(readAll, 15000); // re-read every 15s so it doesn't hit the 60s idle drop
     status('Connected. Logging. Re-reads every 15s.');
-  } catch(e){ status('Error: '+e.message); log('ERROR '+e.message); }
+  } catch(e){ status('Error: '+errStr(e)); log('ERROR '+errStr(e)); }
 };
+function errStr(e){ if (e==null) return String(e); if (typeof e!=='object') return String(e); return [e.name,e.message,e.code].filter(Boolean).join(' / ') || JSON.stringify(e) || String(e); }
 
 $('stop').onclick = () => { clearInterval(keepAlive); if (device && device.gatt.connected) device.gatt.disconnect(); };
 $('clear').onclick = () => { logEl.textContent=''; packets=0; $('count').textContent='0'; };
@@ -142,7 +149,7 @@ async function send(v){
     if (c.properties.write) await c.writeValueWithResponse(bytes); else await c.writeValueWithoutResponse(bytes);
     log(`WRITE ${NAMES[c.uuid]}: ${clean.toUpperCase()}`);
     setTimeout(readAll, 500);
-  } catch(e){ log('write fail: '+e.message); }
+  } catch(e){ log('write fail: '+errStr(e)); }
 }
 $('send').onclick = () => send($('hex').value);
 document.querySelectorAll('.q').forEach(b => b.onclick = () => send(b.dataset.v));
